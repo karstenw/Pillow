@@ -66,21 +66,19 @@ def has_ghostscript():
     return False
    
 
-def Ghostscript(tile, size, fp, scale=1):
+def Ghostscript(tile, size, fp):
     """Render an image using Ghostscript"""
 
     # Unpack decoder tile
     decoder, tile, offset, data = tile[0]
     length, bbox = data
    
-    #Hack to support hi-res rendering
-    scale = int(scale) or 1
-    orig_size = size
-    orig_bbox = bbox
-    size = (size[0] * scale, size[1] * scale)
-    # resolution is dependend on bbox and size
-    res = ( float((72.0 * size[0]) / (bbox[2]-bbox[0])), float((72.0 * size[1]) / (bbox[3]-bbox[1])) )
-    #print("Ghostscript", scale, size, orig_size, bbox, orig_bbox, res)
+    # bbox is in points == 1/72 inch
+    # size is in pixels, a device unit
+    xpointsize = bbox[2] - bbox[0]
+    ypointsize = bbox[3] - bbox[1]
+    xdpi = size[0] / (xpointsize / 72.0)
+    ydpi = size[1] / (ypointsize / 72.0)
 
     import tempfile, os, subprocess
 
@@ -99,19 +97,17 @@ def Ghostscript(tile, size, fp, scale=1):
         # ensure start position
         # go back
         fp.seek(0)
-        lengthfile = fsize
-        while lengthfile > 0:
-            s = fp.read(min(lengthfile, 100*1024))
+        while True:
+            s = fp.read(1024*1024)
             if not s:
                 break
-            length -= len(s)
             f.write(s)
 
     # Build ghostscript command
     command = ["gs",
                "-q",                        # quiet mode
                "-g%dx%d" % size,            # set output geometry (pixels)
-               "-r%fx%f" % res,             # set input DPI (dots per inch)
+               "-r%fx%f" % (xdpi,ydpi),     # set input DPI (dots per inch)
                "-dNOPAUSE -dSAFER",         # don't pause between pages, safe mode
                "-sDEVICE=ppmraw",           # ppm driver
                "-sOutputFile=%s" % outfile, # output file
@@ -119,7 +115,7 @@ def Ghostscript(tile, size, fp, scale=1):
                                             # adjust for image origin
                "-f", infile,                # input file
             ]
-    
+
     if gs_windows_binary is not None:
         if not gs_windows_binary:
             raise WindowsError('Unable to locate Ghostscript on paths')
@@ -227,6 +223,9 @@ class EpsImageFile(ImageFile.ImageFile):
 
         self.mode = "RGB"
         self.size = 1, 1 # FIXME: huh?
+        self.bbox = False
+        self.pointsize = False
+        self.pixelsize = False
 
         #
         # Load EPS header
@@ -256,10 +255,31 @@ class EpsImageFile(ImageFile.ImageFile):
                         # Note: The DSC spec says that BoundingBox
                         # fields should be integers, but some drivers
                         # put floating point values there anyway.
-                        box = [int(float(s)) for s in v.split()]
+
+                        # if self.pointsize is not False, we already have a hiresbbox
+                        if not self.pointsize:
+                            box = [int(float(s)) for s in v.split()]
+                            self.bbox = box
+                            pointsize = box[2] - box[0], box[3] - box[1]
+                            self.size = box[2] - box[0], box[3] - box[1]
+                            self.tile = [ ("eps",
+                                          (0,0) + self.size,
+                                          offset,
+                                          (length, box))]
+                            self.pointsize = pointsize
+                    except:
+                        pass
+                if k == "HiResBoundingBox":
+                    try:
+                        box = [float(s) for s in v.split()]
+                        self.bbox = box
+                        pointsize = box[2] - box[0], box[3] - box[1]
                         self.size = box[2] - box[0], box[3] - box[1]
-                        self.tile = [("eps", (0,0) + self.size, offset,
+                        self.tile = [ ("eps",
+                                      (0,0) + self.size,
+                                      offset,
                                       (length, box))]
+                        self.pointsize = pointsize
                     except:
                         pass
 
@@ -303,11 +323,12 @@ class EpsImageFile(ImageFile.ImageFile):
                 s = s[:-1]
 
             if s[:11] == "%ImageData:":
+                [x, y, bi, mo, z3, z4, en, starttag] = s[11:].split(None, 7)
 
-                [x, y, bi, mo, z3, z4, en, id] =\
-                    s[11:].split(None, 7)
-
-                x = int(x); y = int(y)
+                x = int(x)
+                y = int(y)
+                self.pixelsize = (x,y)
+                self.size = (x,y)
 
                 bi = int(bi)
                 mo = int(mo)
@@ -318,34 +339,28 @@ class EpsImageFile(ImageFile.ImageFile):
                     decoder = "eps_binary"
                 elif en == 2:
                     decoder = "eps_hex"
-                else:
-                    break
-                if bi != 8:
-                    break
+
                 if mo == 1:
                     self.mode = "L"
                 elif mo == 2:
                     self.mode = "LAB"
                 elif mo == 3:
                     self.mode = "RGB"
-                else:
-                    break
+                elif mo == 4:
+                    self.mode = "CMYK"
 
-                if id[:1] == id[-1:] == '"':
-                    id = id[1:-1]
+                bbox = (0, 0, x, y)
+                if self.bbox:
+                    bbox = self.bbox
 
-                # Scan forward to the actual image data
-                while True:
-                    s = fp.readline()
-                    if not s:
-                        break
-                    if s[:len(id)] == id:
-                        self.size = x, y
-                        self.tile2 = [(decoder,
-                                       (0, 0, x, y),
-                                       fp.tell(),
-                                       0)]
-                        return
+                self.tile = [("eps",
+                             (0, 0, x, y),
+                              0,
+                              (length, bbox))]
+                xdpi = round(x / (self.size[0] / 72.0))
+                ydpi = round(y / (self.size[1] / 72.0))
+                self.info["dpi"] = (xdpi,ydpi)
+                return
 
             s = fp.readline()
             if not s:
@@ -354,11 +369,17 @@ class EpsImageFile(ImageFile.ImageFile):
         if not box:
             raise IOError("cannot determine EPS bounding box")
 
-    def load(self, scale=1):
+    def load(self, scale=1.0):
         # Load EPS via Ghostscript
         if not self.tile:
             return
-        self.im = Ghostscript(self.tile, self.size, self.fp, scale)
+        size = self.size
+        if self.pixelsize:
+            # PhotoShop eps with ImageData
+            size = self.pixelsize
+        else:
+            size = ( size[0] * scale, size[1] * scale)
+        self.im = Ghostscript(self.tile, size, self.fp)
         self.mode = self.im.mode
         self.size = self.im.size
         self.tile = []

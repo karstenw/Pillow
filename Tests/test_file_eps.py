@@ -7,6 +7,9 @@ import io
 file1 = "Tests/images/zero_bb.eps"
 file2 = "Tests/images/non_zero_bb.eps"
 
+filecmyk = "Tests/images/cmyk_win_binary.eps"
+filecmyk_compare = "Tests/images/cmyk_win_binary_graphicconverter.png"
+
 # Due to palletization, we'll need to convert these to RGB after load
 file1_compare = "Tests/images/zero_bb.png"
 file1_compare_scale2 = "Tests/images/zero_bb_scale2.png"
@@ -51,6 +54,14 @@ class TestFileEps(PillowTestCase):
         self.assertEqual(image2_scale2.size, (720, 504))
         self.assertEqual(image2_scale2.format, "EPS")
 
+        # cmyk
+        image1 = Image.open(filecmyk)
+        self.assertEqual(image1.mode, "CMYK")
+        image1.load()
+        self.assertEqual(image1.mode, "RGB")
+        self.assertEqual(image1.size, (1181, 1174))
+        self.assertEqual(image1.format, "EPS")
+        
     def test_file_object(self):
         # issue 479
         image1 = Image.open(file1)
