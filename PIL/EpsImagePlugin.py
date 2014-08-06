@@ -308,7 +308,6 @@ class EpsImageFile(ImageFile.ImageFile):
             if s[:1] != "%":
                 break
 
-
         #
         # Scan for an "ImageData" descriptor
 
